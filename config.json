@@ -1,4 +1,20 @@
 {
+    "version": 1,
+    "defaults": {
+        "enabled": true,
+        "process_scope": "main_and_child",
+        "start_up_delay_ms": 0,
+        "injected_libraries": [],
+        "child_gating": {
+            "enabled": false,
+            "mode": "freeze",
+            "injected_libraries": []
+        },
+        "gadget": {
+            "enabled": true,
+            "source_path": "/data/local/tmp/JsxposedXSo/libgadget.so"
+        }
+    },
     "targets": [
 
     ]

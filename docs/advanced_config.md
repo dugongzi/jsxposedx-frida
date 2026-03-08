@@ -1,159 +1,126 @@
-# Advanced Config
+# Advanced Config (v1)
 
-This module is configured only via structured json config.
-The previous simple configuration via `target_packages` / `injected_libraries` has been removed.
+This module only supports `config.json` (v1).  
+Legacy `target_packages` / `injected_libraries` files are removed.
 
-## Config File
+## 1. Config Path
 
-This module is configured via a json config located at `/data/local/tmp/JsxposedXSo/config.json`.
-To start off, edit the installed config and replace the placeholder package name
-```shell
-adb shell 'su -c sed -i s/com.example.package/your.target.application/ /data/local/tmp/JsxposedXSo/config.json'
-```
+Runtime config path:
 
-Example config
+`/data/local/tmp/JsxposedXSo/config.json`
+
+## 2. v1 Schema Overview
+
+Root fields:
+
+- `version`: must be `1`
+- `defaults`: shared defaults for all targets
+- `targets`: per-app entries, `app_name` is required
+
+## 3. Full Example
+
 ```json
 {
-    "targets": [
-        {
-            "app_name" : "com.example.package",
-            "enabled": true,
-            "start_up_delay_ms": 0,
-            "injected_libraries": [
-                {
-                    "path": "/data/local/tmp/JsxposedXSo/libgadget.so"
-                }
-            ],
-            "child_gating": {
-                "enabled": false,
-                "mode": "freeze",
-                "injected_libraries" : [
-                    {
-                        "path": "/data/local/tmp/JsxposedXSo/libgadget-child.so"
-                    }
-                ]
-            }
-        }
-    ]
+  "version": 1,
+  "defaults": {
+    "enabled": true,
+    "process_scope": "main_and_child",
+    "start_up_delay_ms": 0,
+    "injected_libraries": [],
+    "child_gating": {
+      "enabled": false,
+      "mode": "freeze",
+      "injected_libraries": []
+    },
+    "gadget": {
+      "enabled": true,
+      "source_path": "/data/local/tmp/JsxposedXSo/libgadget.so"
+    }
+  },
+  "targets": [
+    {
+      "app_name": "com.example.a",
+      "gadget": {
+        "js_path": "/data/local/tmp/JsxposedXSo/scripts/a.js"
+      }
+    },
+    {
+      "app_name": "com.example.b",
+      "start_up_delay_ms": 5000,
+      "gadget": {
+        "script_dir": "/data/local/tmp/JsxposedXSo/scripts/b"
+      }
+    }
+  ]
 }
 ```
 
-The config contains an array of targets. A target contains the configuration for one application
-you want to inject with frida.
+## 4. Merge Rules (`defaults` -> `targets[i]`)
 
-In case things are not working as expected, check `adb logcat -s ZygiskFrida` to see if an error is logged.
+- `targets[i]` overrides same field from `defaults`.
+- `injected_libraries` is replaced as a whole when present in target.
+- `gadget.js_path`, `gadget.script_dir`, `gadget.frida_config` are mutually exclusive.
+- Invalid targets are skipped and do not block valid targets.
 
-## Target configuration.
+## 5. Process Matching
 
-### app_name
-The bundle id of the application you want to inject frida into.
+`process_scope` options:
 
-### enabled
-If set to false, then this module will ignore this configuration.
-This is useful if you want to temporarily disable a target while maintaining the config.
+- `main_only`: match exact process name only.
+- `main_and_child`: match `com.app` and `com.app:*` (default).
 
+## 6. Gadget Runtime Isolation
 
-### start_up_delay_ms
-Injection of libraries is delayed by this amount in milliseconds.
+When gadget is enabled, module auto-generates runtime files per process:
 
-There are times that you might want to delay the injection of the gadget. Some applications
-might run checks at start up and delaying the injection can help avoid these.
-
-### injected_libraries
-These are the libraries that will be injected into the process. The libraries
-specified here will be loaded in the order of the array.
-
-The module includes a bundled frida gadgets at `/data/local/tmp/JsxposedXSo/libgadget.so`.\
-`libgadget.so` default architecture is always that of your device.
-
-For convenience this module also installs a gadget at `/data/local/tmp/JsxposedXSo/libgadget32.so` for injection into application
-with 32-bit only support on 64-bit devices.
-
-You can adjust the gadget config according to the official [Gadget Doc](https://frida.re/docs/gadget/)
-
-If you want to use a different frida version or an alternative version you can replace this
-with the path to your own gadget.
-
-Using this you can also inject arbitrary libraries alongside the gadget or without the gadget if
-you remove it.
-Make sure that the libraries you provide here have the correct file permissions set and are accessible
-by the app itself.
-
-The module will setup file permissions in the complete `JsxposedXSo` directory on install. If you suspect
-a file permission issue, an easy way to check is to place your libraies within the `JsxposedXSo` directory
-and install the module again (without uninstalling).
-
-
-## Child gating configuration (experimental)
-This is an experimental feature and has a lot of caveats! Please read carefully.
-
-This module is able to intercept fork/vfork within the process to instrument child processes.
-An application might fork a child process to run checks from there that you can't intercept
-without child gating.
-
-By enabling this feature by setting `enabled` to true, you can configure how to deal
-with these child processes.
-
-There are currently 3 modes in how child gating operates. You can determine by
-setting the mode to either `freeze`, `kill` or `inject`.
-
-Using any of the child gating mode can cause issues properly shutting down the application even with a force close.
-This can cause issues restarting the app. Manually killing the app can resolve this.
-```
-adb shell 'su -c kill -9 $(pidof com.example.package)'
+```text
+/data/local/tmp/JsxposedXSo/runtime/<process_key>/
+├── libgadget.so
+└── libgadget.config.so
 ```
 
-### freeze
-The child process will not return from the fork. This means that no code will
-run within the child process but the process itself stays alive.
+`<process_key>` is the real process name with `:` replaced by `__`.
 
-### kill
-The child process will be killed as soon as it is forked. No code will
-run within the child process.
+When `child_gating.mode=inject` and `child_gating.injected_libraries` is empty,
+module also auto-generates child gadget files:
 
-### inject
-This mode will inject the `injected_libraries` into the child process similiar to the target configuration.
-After injection the child process will resume its normal code flow. You may fail to connect to the gadget
-interactively if the child is only doing a quick check and exits.
-
-Please be aware as the child is forked, it already contains all libraries loaded that the parent processs had.
-But as only a single thread returns from the fork the loaded frida gadget thread is not present in the child process.
-
-Reloading the same bundled gadget will fail to start. For this to work you have to load a copy of the gadget.
-You can't load the same file into the process again, a symbolic link won't work either it must be a copy.
-F.e.
-
-```shell
-adb shell 'su -c cp /data/local/tmp/JsxposedXSo/libgadget.so /data/local/tmp/JsxposedXSo/libgadget-child.so'
+```text
+/data/local/tmp/JsxposedXSo/runtime/<process_key>/
+├── libgadget-child.so
+└── libgadget-child.config.so
 ```
 
-The default configuration of a gadget will fail to start due to port conflict with the gadget in the parent process.
-So for the child process you would have to configure the gadget to use a different port.
+For child listen config, module enforces `on_port_conflict=pick-next`.
 
-Create a gadget configuration like this at `/data/local/tmp/JsxposedXSo/libgadget-child.config.so`.
-See [Gadget Doc](https://frida.re/docs/gadget/) for reference.
-```
+## 7. Gadget Config Sources
+
+Inside `gadget`:
+
+- `frida_config`: use this object as final gadget config.
+- `js_path`: auto-generate `interaction.type=script`.
+- `script_dir`: auto-generate `interaction.type=script-directory`.
+- none of above: auto-generate default listen config (`127.0.0.1:27042`, `on_load=wait`).
+
+## 8. Add a New Target (installed module workflow)
+
+1. Edit `/data/local/tmp/JsxposedXSo/config.json` and append one target object.
+2. Restart target app process.
+3. Check runtime files:
+   - `adb shell su -c 'ls -la /data/local/tmp/JsxposedXSo/runtime'`
+4. Check logs:
+   - `adb logcat -s ZygiskFrida Frida`
+
+## 9. Child Auto Inject Example
+
+```json
 {
-  "interaction": {
-    "type": "listen",
-    "address": "127.0.0.1",
-    "port": 27043,
-    "on_port_conflict": "pick-next",
-    "on_load": "wait"
+  "app_name": "com.example.a",
+  "child_gating": {
+    "enabled": true,
+    "mode": "inject",
+    "injected_libraries": []
   }
 }
 ```
 
-Please take note of the `on_port_conflict: pick-next` which is important in case the parent process forks
-multiple children.
-
-As this is a non-default port gadget you can take a look at `adb logcat -s Frida` to see which ports the
-child gadget started on.
-
-Then you can connect it for example via
-```shell
-adb forward tcp:27043 tcp:27043
-frida -H 127.0.0.1:27043 -n Gadget
-```
-
-
+With `injected_libraries: []`, module will auto-generate and inject child gadget runtime files.
