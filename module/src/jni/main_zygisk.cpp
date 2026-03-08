@@ -15,13 +15,18 @@ class MyModule : public zygisk::ModuleBase {
         this->env = env;
     }
 
-    void postAppSpecialize(const AppSpecializeArgs *args) override {
+    void preAppSpecialize(AppSpecializeArgs *args) override {
         const char *raw_app_name = env->GetStringUTFChars(args->nice_name, nullptr);
-
-        std::string app_name = std::string(raw_app_name);
+        this->app_name = std::string(raw_app_name);
         this->env->ReleaseStringUTFChars(args->nice_name, raw_app_name);
 
-        if (!check_and_inject(app_name)) {
+        this->prepared = prepare_for_process(this->app_name);
+    }
+
+    void postAppSpecialize(const AppSpecializeArgs *args) override {
+        (void) args;
+
+        if (!this->prepared || !inject_prepared(this->app_name)) {
             this->api->setOption(zygisk::Option::DLCLOSE_MODULE_LIBRARY);
         }
     }
@@ -29,6 +34,8 @@ class MyModule : public zygisk::ModuleBase {
  private:
     Api *api;
     JNIEnv *env;
+    std::string app_name;
+    bool prepared = false;
 };
 
 REGISTER_ZYGISK_MODULE(MyModule)

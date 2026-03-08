@@ -7,6 +7,7 @@
 #include "inject.h"
 
 static std::string app_name = ""; // NOLINT
+static bool app_prepared = false; // NOLINT
 
 static void forkAndSpecializePre(
     JNIEnv *env, jclass clazz, jint *uid, jint *gid, jintArray *gids,
@@ -19,6 +20,7 @@ static void forkAndSpecializePre(
     const char* raw_app_name = env->GetStringUTFChars(*niceName, nullptr);
     app_name = std::string(raw_app_name);
     env->ReleaseStringUTFChars(*niceName, raw_app_name);
+    app_prepared = prepare_for_process(app_name);
 }
 
 static void forkAndSpecializePost(JNIEnv *env, jclass clazz, jint res) {
@@ -26,9 +28,11 @@ static void forkAndSpecializePost(JNIEnv *env, jclass clazz, jint res) {
         return;
     }
 
-    if (check_and_inject(app_name)) {
+    if (app_prepared && inject_prepared(app_name)) {
         riru_set_unload_allowed(false);
     }
+
+    app_prepared = false;
 }
 
 static void specializeAppProcessPre(

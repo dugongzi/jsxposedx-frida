@@ -7,9 +7,12 @@
 #include <cinttypes>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -27,6 +30,15 @@ static constexpr const char *kModuleDir = "/data/local/tmp/JsxposedXSo";
 static constexpr int kDefaultMainListenPort = 27042;
 static constexpr int kDefaultChildListenPort = 27043;
 
+struct prepared_injection {
+    target_config target;
+    child_gating_config child_cfg;
+    std::vector<std::string> libs_to_inject;
+};
+
+static std::mutex g_prepared_injections_lock;
+static std::unordered_map<std::string, prepared_injection> g_prepared_injections;
+
 static std::string get_process_name() {
     auto path = "/proc/self/cmdline";
 
@@ -38,7 +50,7 @@ static std::string get_process_name() {
 }
 
 static void wait_for_init(const std::string &process_name) {
-    LOGI("Wait for process to complete init");
+    LOGI("[INJECT] wait for process to complete init");
 
     // wait until the process is renamed to the configured process name
     while (get_process_name().find(process_name) == std::string::npos) {
@@ -48,7 +60,7 @@ static void wait_for_init(const std::string &process_name) {
     // additional tolerance for the init to complete after process rename
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    LOGI("Process init completed");
+    LOGI("[INJECT] process init completed");
 }
 
 static void delay_start_up(uint64_t start_up_delay_ms) {
@@ -56,7 +68,7 @@ static void delay_start_up(uint64_t start_up_delay_ms) {
         return;
     }
 
-    LOGI("Waiting for configured start up delay %" PRIu64"ms", start_up_delay_ms);
+    LOGI("[INJECT] waiting for configured start up delay %" PRIu64"ms", start_up_delay_ms);
 
     int countdown = 0;
     uint64_t delay = start_up_delay_ms;
@@ -69,7 +81,7 @@ static void delay_start_up(uint64_t start_up_delay_ms) {
     std::this_thread::sleep_for(std::chrono::milliseconds(delay));
 
     for (int i = countdown; i > 0; i--) {
-        LOGI("Injecting libs in %d seconds", i);
+        LOGI("[INJECT] injecting libs in %d seconds", i);
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 }
@@ -217,7 +229,7 @@ static std::string build_gadget_config_json(const gadget_config &cfg, bool is_ch
     rapidjson::Document doc;
     doc.Parse(cfg.frida_config_json.c_str());
     if (doc.HasParseError() || !doc.IsObject()) {
-        LOGE("invalid gadget.frida_config json: %s",
+        LOGE("[PREPARE] invalid gadget.frida_config json: %s",
              doc.HasParseError() ? GetParseError_En(doc.GetParseError()) : "root must be object");
         return default_gadget_config_json(cfg, is_child);
     }
@@ -266,7 +278,7 @@ static std::optional<std::string> prepare_runtime_gadget(const target_config &cf
     }
 
     if (cfg.gadget.source_path.empty()) {
-        LOGE("gadget.source_path is empty for %s", cfg.process_name.c_str());
+        LOGE("[PREPARE] gadget.source_path is empty for %s", cfg.process_name.c_str());
         return std::nullopt;
     }
 
@@ -275,7 +287,9 @@ static std::optional<std::string> prepare_runtime_gadget(const target_config &cf
     std::error_code error;
     std::filesystem::create_directories(runtime_dir, error);
     if (error) {
-        LOGE("failed to create runtime dir %s: %s", runtime_dir.c_str(), error.message().c_str());
+        LOGE("[PREPARE] failed to create runtime dir %s: %s",
+             runtime_dir.c_str(),
+             error.message().c_str());
         return std::nullopt;
     }
 
@@ -285,7 +299,7 @@ static std::optional<std::string> prepare_runtime_gadget(const target_config &cf
     auto runtime_config_path = runtime_dir + "/" + runtime_config_name;
 
     if (!copy_file_contents(cfg.gadget.source_path, runtime_gadget_path)) {
-        LOGE("failed to copy gadget source %s to %s",
+        LOGE("[PREPARE] failed to copy gadget source %s to %s",
              cfg.gadget.source_path.c_str(),
              runtime_gadget_path.c_str());
         return std::nullopt;
@@ -293,11 +307,11 @@ static std::optional<std::string> prepare_runtime_gadget(const target_config &cf
 
     auto gadget_config_json = build_gadget_config_json(cfg.gadget, is_child);
     if (!write_file_contents(runtime_config_path, gadget_config_json)) {
-        LOGE("failed to write runtime gadget config %s", runtime_config_path.c_str());
+        LOGE("[PREPARE] failed to write runtime gadget config %s", runtime_config_path.c_str());
         return std::nullopt;
     }
 
-    LOGI("Prepared %s runtime gadget for %s at %s",
+    LOGI("[PREPARE] prepared %s runtime gadget for %s at %s",
          is_child ? "child" : "main",
          process_name.c_str(),
          runtime_gadget_path.c_str());
@@ -314,8 +328,49 @@ static void append_unique(std::vector<std::string> &libs, const std::string &lib
     libs.push_back(lib);
 }
 
-static void inject_libs(const target_config &cfg) {
+static std::optional<prepared_injection> build_prepared_injection(const target_config &cfg) {
     auto process_name = cfg.process_name.empty() ? cfg.app_name : cfg.process_name;
+
+    prepared_injection prepared = {};
+    prepared.target = cfg;
+    prepared.child_cfg = cfg.child_gating;
+
+    auto runtime_gadget = prepare_runtime_gadget(cfg, false);
+    if (cfg.gadget.enabled && !runtime_gadget.has_value()) {
+        LOGE("[PREPARE] gadget enabled but runtime gadget preparation failed for %s",
+             process_name.c_str());
+        return std::nullopt;
+    }
+    if (runtime_gadget.has_value()) {
+        append_unique(prepared.libs_to_inject, runtime_gadget.value());
+    }
+
+    for (const auto &lib_path : cfg.injected_libraries) {
+        append_unique(prepared.libs_to_inject, lib_path);
+    }
+
+    if (prepared.child_cfg.enabled && prepared.child_cfg.mode == "inject" &&
+        prepared.child_cfg.injected_libraries.empty()) {
+        auto child_runtime_gadget = prepare_runtime_gadget(cfg, true);
+        if (child_runtime_gadget.has_value()) {
+            prepared.child_cfg.injected_libraries.push_back(child_runtime_gadget.value());
+            LOGI("[PREPARE] auto-generated child gadget for %s: %s",
+                 process_name.c_str(),
+                 child_runtime_gadget.value().c_str());
+        } else {
+            LOGE("[PREPARE] child_gating inject requested but failed to prepare child runtime gadget "
+                 "for %s",
+                 process_name.c_str());
+        }
+    }
+
+    return prepared;
+}
+
+static void inject_prepared_libs(prepared_injection prepared) {
+    auto process_name = prepared.target.process_name.empty()
+                            ? prepared.target.app_name
+                            : prepared.target.process_name;
 
     // We need to wait for process initialization to complete.
     // Loading the gadget before that will freeze the process
@@ -323,66 +378,81 @@ static void inject_libs(const target_config &cfg) {
     // undiscoverable or otherwise cause issue attaching.
     wait_for_init(process_name);
 
-    std::vector<std::string> libs_to_inject;
-    auto runtime_gadget = prepare_runtime_gadget(cfg, false);
-    if (cfg.gadget.enabled && !runtime_gadget.has_value()) {
-        LOGE("gadget enabled but runtime gadget preparation failed for %s", process_name.c_str());
-        return;
-    }
-    if (runtime_gadget.has_value()) {
-        append_unique(libs_to_inject, runtime_gadget.value());
+    if (prepared.child_cfg.enabled) {
+        LOGI("[INJECT] enabling child gating for %s (mode=%s)",
+             process_name.c_str(),
+             prepared.child_cfg.mode.c_str());
+        enable_child_gating(prepared.child_cfg);
     }
 
-    for (const auto &lib_path : cfg.injected_libraries) {
-        append_unique(libs_to_inject, lib_path);
-    }
+    delay_start_up(prepared.target.start_up_delay_ms);
 
-    auto child_cfg = cfg.child_gating;
-    if (child_cfg.enabled && child_cfg.mode == "inject" && child_cfg.injected_libraries.empty()) {
-        auto child_runtime_gadget = prepare_runtime_gadget(cfg, true);
-        if (child_runtime_gadget.has_value()) {
-            child_cfg.injected_libraries.push_back(child_runtime_gadget.value());
-            LOGI("Auto-generated child gadget for %s: %s",
-                 process_name.c_str(),
-                 child_runtime_gadget.value().c_str());
-        } else {
-            LOGE("child_gating inject requested but failed to prepare child runtime gadget for %s",
-                 process_name.c_str());
-        }
-    }
-
-    if (child_cfg.enabled) {
-        enable_child_gating(child_cfg);
-    }
-
-    delay_start_up(cfg.start_up_delay_ms);
-
-    for (const auto &lib_path : libs_to_inject) {
-        LOGI("Injecting %s", lib_path.c_str());
-        inject_lib(lib_path, "");
+    for (const auto &lib_path : prepared.libs_to_inject) {
+        LOGI("[INJECT] injecting %s", lib_path.c_str());
+        inject_lib(lib_path, "[INJECT] ");
     }
 }
 
-bool check_and_inject(const std::string &app_name) {
-    std::string module_dir = std::string(kModuleDir);
-
-    std::optional<target_config> cfg = load_config(module_dir, app_name);
+bool prepare_for_process(const std::string &app_name) {
+    const auto module_dir = std::string(kModuleDir);
+    auto cfg = load_config(module_dir, app_name);
     if (!cfg.has_value()) {
         return false;
     }
 
-    LOGI("App detected: %s", app_name.c_str());
-    LOGI("PID: %d", getpid());
-    LOGI("Matched target: %s", cfg.value().app_name.c_str());
-
     auto target = cfg.value();
+    auto process_name = target.process_name.empty() ? target.app_name : target.process_name;
+
+    LOGI("[PREPARE] app detected: %s", app_name.c_str());
+    LOGI("[PREPARE] pid: %d", getpid());
+    LOGI("[PREPARE] matched target: %s", target.app_name.c_str());
+
     if (!target.enabled) {
-        LOGI("Injection disabled for %s", app_name.c_str());
+        LOGI("[PREPARE] injection disabled for %s", process_name.c_str());
         return false;
     }
 
-    std::thread inject_thread(inject_libs, target);
-    inject_thread.detach();
+    auto prepared = build_prepared_injection(target);
+    if (!prepared.has_value()) {
+        LOGE("[PREPARE] failed to build injection plan for %s", process_name.c_str());
+        return false;
+    }
 
+    {
+        std::lock_guard<std::mutex> lock(g_prepared_injections_lock);
+        auto [it, inserted] = g_prepared_injections.insert_or_assign(app_name, prepared.value());
+        if (!inserted) {
+            LOGI("[PREPARE] replaced stale prepared state for %s", it->first.c_str());
+        }
+    }
+
+    LOGI("[PREPARE] ready for %s (%zu libs)",
+         process_name.c_str(),
+         prepared.value().libs_to_inject.size());
     return true;
+}
+
+bool inject_prepared(const std::string &app_name) {
+    std::optional<prepared_injection> prepared = std::nullopt;
+    {
+        std::lock_guard<std::mutex> lock(g_prepared_injections_lock);
+        auto it = g_prepared_injections.find(app_name);
+        if (it == g_prepared_injections.end()) {
+            LOGI("[INJECT] no prepared plan for %s", app_name.c_str());
+            return false;
+        }
+        prepared = std::move(it->second);
+        g_prepared_injections.erase(it);
+    }
+
+    std::thread inject_thread(inject_prepared_libs, std::move(prepared.value()));
+    inject_thread.detach();
+    return true;
+}
+
+bool check_and_inject(const std::string &app_name) {
+    if (!prepare_for_process(app_name)) {
+        return false;
+    }
+    return inject_prepared(app_name);
 }
