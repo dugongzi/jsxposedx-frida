@@ -93,7 +93,8 @@ void inject_lib(const std::string &lib_path, const std::string &logContext) {
     auto *handle = xdl_open(lib_path.c_str(), XDL_TRY_FORCE_LOAD);
     if (handle) {
         LOGI("%sInjected %s with handle %p", logContext.c_str(), lib_path.c_str(), handle);
-        remap_lib(lib_path);
+        // NOTE: Runtime remap is disabled for stability on some ROMs.
+        // We observed intermittent SEGV_ACCERR after remapping libgadget pages.
         return;
     }
 
@@ -102,7 +103,7 @@ void inject_lib(const std::string &lib_path, const std::string &logContext) {
     handle = dlopen(lib_path.c_str(), RTLD_NOW);
     if (handle) {
         LOGI("%sInjected %s with handle %p (dlopen)", logContext.c_str(), lib_path.c_str(), handle);
-        remap_lib(lib_path);
+        // NOTE: Runtime remap is disabled for stability on some ROMs.
         return;
     }
 
