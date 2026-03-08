@@ -29,10 +29,9 @@ using riru with an older magisk version rather than zygisk.
   If you are using riru instead of zygisk choose the riru-release. Otherwise choose the normal version.
 - Transfer the ZygiskFrida zip file to your device and install it via Magisk.
 - Reboot after install
-- Create the config file and adjust the package name to your target app (replace `your.target.application` in the commands)
+- Adjust the config file package name to your target app (replace `your.target.application` in the command)
 ```shell
-adb shell 'su -c cp /data/local/tmp/re.zyg.fri/config.json.example /data/local/tmp/re.zyg.fri/config.json'
-adb shell 'su -c sed -i s/com.example.package/your.target.application/ /data/local/tmp/re.zyg.fri/config.json'
+adb shell 'su -c sed -i s/com.example.package/your.target.application/ /data/local/tmp/JsxposedXSo/config.json'
 ```
 - Launch your app. It will pause at startup allowing you to attach
   f.e. `frida -U -N your.target.application` or `frida -U -n Gadget`
@@ -64,4 +63,6 @@ You can also build and install the module to your device directly with `./gradle
 
 - Inspired by https://github.com/Perfare/Zygisk-Il2CppDumper
 - https://github.com/hexhacking/xDL
+
+
 

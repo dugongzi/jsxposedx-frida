@@ -111,7 +111,7 @@ afterEvaluate {
 
             into magiskDir
             from(rootDir) {
-                include 'config.json.example'
+                include 'config.json'
             }
             from(templatePath) {
                 exclude 'module.prop'
@@ -209,3 +209,4 @@ afterEvaluate {
         variant.assembleProvider.get().finalizedBy("zip${variantCapped}")
     }
 }
+

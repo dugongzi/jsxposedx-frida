@@ -3,7 +3,7 @@ SKIPUNZIP=1
 FLAVOR=@FLAVOR@
 MODULE_ID=@MODULE_ID@
 
-TMP_MODULE_DIR=/data/local/tmp/re.zyg.fri
+TMP_MODULE_DIR=/data/local/tmp/JsxposedXSo
 
 if [ "$FLAVOR" != "zygisk" ] && [ "$FLAVOR" != "riru" ]; then
   abort "! Unknown ZygiskFrida flavor: $FLAVOR"
@@ -98,10 +98,12 @@ if [ "$IS64BIT" = true ]; then
   rm "$TMP_MODULE_DIR/libgadget32.so.xz"
 fi
 
-extract "$ZIPFILE" "config.json.example" "$TMP_MODULE_DIR" true
+extract "$ZIPFILE" "config.json" "$TMP_MODULE_DIR" true
 
 set_perm_recursive "$TMP_MODULE_DIR" 0 0 0755 0644
 set_perm_recursive "$MODPATH" 0 0 0755 0644
+
+
 
 
 
