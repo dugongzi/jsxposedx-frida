@@ -1,8 +1,10 @@
 #include "config.h"
 
+#include <cerrno>
 #include <fstream>
 #include <optional>
 #include <string>
+#include <cstring>
 
 #include "log.h"
 #include "rapidjson/document.h"
@@ -311,8 +313,13 @@ static bool matches_process(const target_config &cfg, const std::string &process
 
 static std::optional<target_config> load_advanced_config(const std::string &module_dir,
                                                          const std::string &process_name) {
-    std::ifstream config_file(module_dir + "/config.json");
+    auto config_path = module_dir + "/config.json";
+    std::ifstream config_file(config_path);
     if (!config_file.is_open()) {
+        LOGE("failed to open config: %s errno=%d (%s)",
+             config_path.c_str(),
+             errno,
+             std::strerror(errno));
         return std::nullopt;
     }
 
@@ -399,6 +406,10 @@ static std::optional<target_config> load_advanced_config(const std::string &modu
 
     if (skipped_targets > 0) {
         LOGE("skipped %d invalid target(s) while parsing config", skipped_targets);
+    }
+
+    if (!selected_target.has_value()) {
+        LOGI("no target matched process %s", process_name.c_str());
     }
 
     return selected_target;

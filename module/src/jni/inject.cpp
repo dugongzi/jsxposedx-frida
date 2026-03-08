@@ -5,8 +5,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cinttypes>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -31,7 +33,8 @@ static constexpr int kDefaultMainListenPort = 27042;
 static constexpr int kDefaultChildListenPort = 27043;
 
 struct prepared_injection {
-    target_config target;
+    std::string process_name;
+    uint64_t start_up_delay_ms = 0;
     child_gating_config child_cfg;
     std::vector<std::string> libs_to_inject;
 };
@@ -328,11 +331,169 @@ static void append_unique(std::vector<std::string> &libs, const std::string &lib
     libs.push_back(lib);
 }
 
+static bool write_all(int fd, const void *data, size_t size) {
+    const auto *buf = static_cast<const uint8_t *>(data);
+    size_t remaining = size;
+
+    while (remaining > 0) {
+        auto written = write(fd, buf, remaining);
+        if (written <= 0) {
+            return false;
+        }
+        buf += written;
+        remaining -= static_cast<size_t>(written);
+    }
+
+    return true;
+}
+
+static bool read_all(int fd, void *data, size_t size) {
+    auto *buf = static_cast<uint8_t *>(data);
+    size_t remaining = size;
+
+    while (remaining > 0) {
+        auto read_bytes = read(fd, buf, remaining);
+        if (read_bytes <= 0) {
+            return false;
+        }
+        buf += read_bytes;
+        remaining -= static_cast<size_t>(read_bytes);
+    }
+
+    return true;
+}
+
+static bool write_u32(int fd, uint32_t value) {
+    return write_all(fd, &value, sizeof(value));
+}
+
+static bool write_u64(int fd, uint64_t value) {
+    return write_all(fd, &value, sizeof(value));
+}
+
+static bool read_u32(int fd, uint32_t *value) {
+    return read_all(fd, value, sizeof(*value));
+}
+
+static bool read_u64(int fd, uint64_t *value) {
+    return read_all(fd, value, sizeof(*value));
+}
+
+static bool write_string(int fd, const std::string &value) {
+    if (value.size() > std::numeric_limits<uint32_t>::max()) {
+        return false;
+    }
+    auto size = static_cast<uint32_t>(value.size());
+    if (!write_u32(fd, size)) {
+        return false;
+    }
+    return size == 0 || write_all(fd, value.data(), size);
+}
+
+static bool read_string(int fd, std::string *value) {
+    constexpr uint32_t kMaxIpcStringSize = 1024 * 1024;
+
+    uint32_t size = 0;
+    if (!read_u32(fd, &size)) {
+        return false;
+    }
+    if (size > kMaxIpcStringSize) {
+        return false;
+    }
+
+    value->assign(size, '\0');
+    if (size == 0) {
+        return true;
+    }
+    return read_all(fd, value->data(), size);
+}
+
+static bool write_string_vector(int fd, const std::vector<std::string> &values) {
+    if (values.size() > std::numeric_limits<uint32_t>::max()) {
+        return false;
+    }
+    auto count = static_cast<uint32_t>(values.size());
+    if (!write_u32(fd, count)) {
+        return false;
+    }
+    for (const auto &value : values) {
+        if (!write_string(fd, value)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool read_string_vector(int fd, std::vector<std::string> *values) {
+    constexpr uint32_t kMaxIpcVectorSize = 512;
+
+    uint32_t count = 0;
+    if (!read_u32(fd, &count)) {
+        return false;
+    }
+    if (count > kMaxIpcVectorSize) {
+        return false;
+    }
+
+    values->clear();
+    values->reserve(count);
+    for (uint32_t i = 0; i < count; i++) {
+        std::string value;
+        if (!read_string(fd, &value)) {
+            return false;
+        }
+        values->push_back(std::move(value));
+    }
+    return true;
+}
+
+static bool write_prepared_injection(int fd, const prepared_injection &prepared) {
+    if (!write_string(fd, prepared.process_name)) {
+        return false;
+    }
+    if (!write_u64(fd, prepared.start_up_delay_ms)) {
+        return false;
+    }
+    if (!write_u32(fd, prepared.child_cfg.enabled ? 1U : 0U)) {
+        return false;
+    }
+    if (!write_string(fd, prepared.child_cfg.mode)) {
+        return false;
+    }
+    if (!write_string_vector(fd, prepared.child_cfg.injected_libraries)) {
+        return false;
+    }
+    return write_string_vector(fd, prepared.libs_to_inject);
+}
+
+static bool read_prepared_injection(int fd, prepared_injection *prepared) {
+    uint32_t child_enabled = 0;
+
+    if (!read_string(fd, &prepared->process_name)) {
+        return false;
+    }
+    if (!read_u64(fd, &prepared->start_up_delay_ms)) {
+        return false;
+    }
+    if (!read_u32(fd, &child_enabled)) {
+        return false;
+    }
+    prepared->child_cfg.enabled = (child_enabled != 0U);
+    if (!read_string(fd, &prepared->child_cfg.mode)) {
+        return false;
+    }
+    if (!read_string_vector(fd, &prepared->child_cfg.injected_libraries)) {
+        return false;
+    }
+    return read_string_vector(fd, &prepared->libs_to_inject);
+}
+
 static std::optional<prepared_injection> build_prepared_injection(const target_config &cfg) {
     auto process_name = cfg.process_name.empty() ? cfg.app_name : cfg.process_name;
 
     prepared_injection prepared = {};
-    prepared.target = cfg;
+    prepared.process_name = process_name;
+    prepared.start_up_delay_ms = cfg.start_up_delay_ms;
     prepared.child_cfg = cfg.child_gating;
 
     auto runtime_gadget = prepare_runtime_gadget(cfg, false);
@@ -368,9 +529,7 @@ static std::optional<prepared_injection> build_prepared_injection(const target_c
 }
 
 static void inject_prepared_libs(prepared_injection prepared) {
-    auto process_name = prepared.target.process_name.empty()
-                            ? prepared.target.app_name
-                            : prepared.target.process_name;
+    auto process_name = prepared.process_name;
 
     // We need to wait for process initialization to complete.
     // Loading the gadget before that will freeze the process
@@ -385,7 +544,7 @@ static void inject_prepared_libs(prepared_injection prepared) {
         enable_child_gating(prepared.child_cfg);
     }
 
-    delay_start_up(prepared.target.start_up_delay_ms);
+    delay_start_up(prepared.start_up_delay_ms);
 
     for (const auto &lib_path : prepared.libs_to_inject) {
         LOGI("[INJECT] injecting %s", lib_path.c_str());
@@ -393,11 +552,14 @@ static void inject_prepared_libs(prepared_injection prepared) {
     }
 }
 
-bool prepare_for_process(const std::string &app_name) {
+static std::optional<prepared_injection> prepare_injection_plan_for_process(const std::string &app_name) {
+    LOGI("[PREPARE] evaluate process: %s", app_name.c_str());
+
     const auto module_dir = std::string(kModuleDir);
     auto cfg = load_config(module_dir, app_name);
     if (!cfg.has_value()) {
-        return false;
+        LOGI("[PREPARE] no config matched for process: %s", app_name.c_str());
+        return std::nullopt;
     }
 
     auto target = cfg.value();
@@ -409,27 +571,99 @@ bool prepare_for_process(const std::string &app_name) {
 
     if (!target.enabled) {
         LOGI("[PREPARE] injection disabled for %s", process_name.c_str());
-        return false;
+        return std::nullopt;
     }
 
     auto prepared = build_prepared_injection(target);
     if (!prepared.has_value()) {
         LOGE("[PREPARE] failed to build injection plan for %s", process_name.c_str());
-        return false;
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(g_prepared_injections_lock);
-        auto [it, inserted] = g_prepared_injections.insert_or_assign(app_name, prepared.value());
-        if (!inserted) {
-            LOGI("[PREPARE] replaced stale prepared state for %s", it->first.c_str());
-        }
+        return std::nullopt;
     }
 
     LOGI("[PREPARE] ready for %s (%zu libs)",
          process_name.c_str(),
          prepared.value().libs_to_inject.size());
+
+    return prepared;
+}
+
+bool prepare_for_process(const std::string &app_name) {
+    auto prepared = prepare_injection_plan_for_process(app_name);
+    if (!prepared.has_value()) {
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_prepared_injections_lock);
+        auto [it, inserted] = g_prepared_injections.insert_or_assign(app_name, std::move(prepared.value()));
+        if (!inserted) {
+            LOGI("[PREPARE] replaced stale prepared state for %s", it->first.c_str());
+        }
+    }
+
     return true;
+}
+
+bool prepare_for_process_with_companion(const std::string &app_name, int companion_fd) {
+    if (companion_fd < 0) {
+        LOGE("[PREPARE] invalid companion fd for %s", app_name.c_str());
+        return false;
+    }
+
+    if (!write_string(companion_fd, app_name)) {
+        LOGE("[PREPARE] failed to send process name to companion for %s", app_name.c_str());
+        return false;
+    }
+
+    uint32_t success = 0;
+    if (!read_u32(companion_fd, &success)) {
+        LOGE("[PREPARE] failed to read companion status for %s", app_name.c_str());
+        return false;
+    }
+    if (success == 0) {
+        LOGI("[PREPARE] companion returned no plan for %s", app_name.c_str());
+        return false;
+    }
+
+    prepared_injection prepared = {};
+    if (!read_prepared_injection(companion_fd, &prepared)) {
+        LOGE("[PREPARE] failed to read companion plan for %s", app_name.c_str());
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_prepared_injections_lock);
+        auto [it, inserted] = g_prepared_injections.insert_or_assign(app_name, std::move(prepared));
+        if (!inserted) {
+            LOGI("[PREPARE] replaced stale prepared state for %s", it->first.c_str());
+        }
+    }
+
+    LOGI("[PREPARE] companion prepared plan for %s", app_name.c_str());
+    return true;
+}
+
+void handle_prepare_companion_request(int client_fd) {
+    std::string app_name;
+    if (!read_string(client_fd, &app_name)) {
+        LOGE("[PREPARE] companion failed to read process name request");
+        return;
+    }
+
+    auto prepared = prepare_injection_plan_for_process(app_name);
+    const uint32_t success = prepared.has_value() ? 1U : 0U;
+    if (!write_u32(client_fd, success)) {
+        LOGE("[PREPARE] companion failed to write status for %s", app_name.c_str());
+        return;
+    }
+
+    if (!prepared.has_value()) {
+        return;
+    }
+
+    if (!write_prepared_injection(client_fd, prepared.value())) {
+        LOGE("[PREPARE] companion failed to write plan for %s", app_name.c_str());
+    }
 }
 
 bool inject_prepared(const std::string &app_name) {
@@ -447,6 +681,7 @@ bool inject_prepared(const std::string &app_name) {
 
     std::thread inject_thread(inject_prepared_libs, std::move(prepared.value()));
     inject_thread.detach();
+    LOGI("[INJECT] scheduled injection thread for %s", app_name.c_str());
     return true;
 }
 
