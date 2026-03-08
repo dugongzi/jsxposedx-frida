@@ -2,7 +2,6 @@
 
 #include <string>
 #include <fstream>
-#include <sstream>
 #include <optional>
 
 #include "rapidjson/document.h"
@@ -120,73 +119,6 @@ static std::optional<target_config> deserialize_target_config(const rapidjson::V
     return result;
 }
 
-static std::vector<std::string> split(std::string const &str, char delimiter) {
-    std::vector<std::string> result;
-    std::stringstream ss(str);
-
-    std::string tmp;
-    while (getline(ss, tmp, delimiter)) {
-        result.push_back(tmp);
-    }
-
-    return result;
-}
-
-static std::vector<std::string> parse_injected_libraries(std::string const &module_dir) {
-    auto config_file_path = module_dir + "/injected_libraries";
-
-    std::ifstream config_file(config_file_path);
-    if (!config_file.is_open()) {
-        return {module_dir + "/libgadget.so"};
-    }
-
-    std::vector<std::string> injected_libraries;
-
-    std::string libpath;
-    while (getline(config_file, libpath)) {
-        if (!libpath.empty()) {
-            injected_libraries.push_back(libpath);
-        }
-    }
-
-    config_file.close();
-
-    return injected_libraries;
-}
-
-static std::optional<target_config> load_simple_config(std::string const &module_dir, std::string const &app_name) {
-    std::ifstream config_file(module_dir + "/target_packages");
-    if (!config_file.is_open()) {
-        return std::nullopt;
-    }
-
-    std::string line;
-    while (getline(config_file, line)) {
-        if (line.empty()) {
-            continue;
-        }
-
-        auto splitted = split(line, ',');
-        if (splitted[0] != app_name) {
-            continue;
-        }
-
-        target_config cfg = {};
-        cfg.app_name = splitted[0];
-        cfg.enabled = true;
-        if (splitted.size() >= 2) {
-            cfg.start_up_delay_ms = std::strtoul(splitted[1].c_str(), nullptr, 10);
-        }
-        cfg.injected_libraries = parse_injected_libraries(module_dir);
-
-        config_file.close();
-        return cfg;
-    }
-
-    config_file.close();
-    return std::nullopt;
-}
-
 static std::optional<target_config> load_advanced_config(std::string const &module_dir, std::string const &app_name) {
     std::ifstream config_file(module_dir + "/config.json");
     if (!config_file.is_open()) {
@@ -233,10 +165,5 @@ static std::optional<target_config> load_advanced_config(std::string const &modu
 }
 
 std::optional<target_config> load_config(std::string const &module_dir, std::string const &app_name) {
-    auto cfg = load_advanced_config(module_dir, app_name);
-    if (cfg.has_value()) {
-        return cfg;
-    }
-
-    return load_simple_config(module_dir, app_name);
+    return load_advanced_config(module_dir, app_name);
 }

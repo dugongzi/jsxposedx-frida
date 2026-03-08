@@ -1,10 +1,7 @@
 # Advanced Config
 
-For the previous configuration method with various files, see [simple config](simple_config.md).
-It remains a valid method of configuration but the structured configuration method specified here is the preferred
-method in the future and also supports more features.
-
-Both configuration are supported with the advanced config taking precedence in case an app appears in both.
+This module is configured only via structured json config.
+The previous simple configuration via `target_packages` / `injected_libraries` has been removed.
 
 ## Config File
 
