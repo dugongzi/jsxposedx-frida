@@ -11,3 +11,4 @@ local.properties
 /gadget/*
 !.gitkeep
 out
+docs/
