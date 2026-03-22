@@ -4,8 +4,8 @@ ext {
     moduleName = "JsxposedxFrida"
     moduleAuthor = "挽风"
     moduleDescription = "Injects frida gadget via zygisk.Thanks to Lico-N for technical support.git:https://github.com/lico-n/ZygiskFrida"
-    moduleVersion = "v2.0.0"
-    moduleVersionCode = 200
+    moduleVersion = "v2.0.1"
+    moduleVersionCode = 201
 
     // Riru
     moduleMinRiruApiVersion = 24
