@@ -32,13 +32,34 @@ task downloadFrida(type: Download) {
 
     def downloads = [sources, outputs].transpose().collectEntries()
 
-    src downloads.keySet()
+    def gadgetDir = file("$rootDir/gadget")
+    def missingSources = {
+        downloads.findAll { source, output ->
+            !file("${gadgetDir}/${output}").exists()
+        }
+    }
+
+    src missingSources().keySet()
     dest "$rootDir/gadget"
-    overwrite true
-    onlyIfModified true
+    overwrite false
     quiet true
+    onlyIf {
+        !missingSources().isEmpty()
+    }
+    doFirst {
+        gadgetDir.mkdirs()
+        src missingSources().keySet()
+    }
     eachFile { f ->
         f.name = downloads[f.sourceURL.toString()]
+    }
+    doLast {
+        def missingOutputs = downloads.values().findAll { output ->
+            !file("${gadgetDir}/${output}").exists()
+        }
+        if (!missingOutputs.isEmpty()) {
+            throw new GradleException("Missing Frida gadget files after download: ${missingOutputs.join(', ')}")
+        }
     }
 }
 
