@@ -1,0 +1,5 @@
+*.sh text eol=lf
+*.gradle text eol=lf
+gradlew text eol=lf
+template/magisk_module/META-INF/com/google/android/update-binary text eol=lf
+template/magisk_module/META-INF/com/google/android/updater-script text eol=lf

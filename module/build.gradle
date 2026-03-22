@@ -118,6 +118,11 @@ afterEvaluate {
                 exclude 'riru.sh'
                 exclude 'customize.sh'
                 exclude 'verify.sh'
+                exclude 'META-INF/**'
+            }
+            from(templatePath) {
+                include 'META-INF/**'
+                filter(FixCrLfFilter.class, eol: FixCrLfFilter.CrLf.newInstance("lf"))
             }
             from(templatePath) {
                 include 'module.prop'
